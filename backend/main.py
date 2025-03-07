@@ -1,5 +1,3 @@
-
-
 """
 Research Paper Recommender API
 FastAPI application that integrates with the ResearchRecommender system
@@ -20,7 +18,6 @@ import uvicorn
 import logging
 import logging.handlers
 import traceback
-import logging
 import sys
 
 # Ensure UTF-8 encoding for logs
@@ -45,7 +42,6 @@ LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 log_file = os.path.join(LOG_DIR, "app.log")
 
-
 logger = logging.getLogger("research_api")
 
 # Configurable settings
@@ -65,27 +61,37 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Initializing components...")
     try:
-        # Import the ResearchRecommender class directly from the module
-        from research_recommender import ResearchRecommender
+        # Import the ResearchRecommender class from your new package structure
+        from models.research_recommender import ResearchRecommender
         
         global recommender
+        # Set the current directory as base for relative paths
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Initialize the recommender with proper paths
         recommender = ResearchRecommender()
+        
+        # Ensure database paths are absolute
+        # Uncomment if you have path issues:
+        # recommender.fetcher.db_path = os.path.join(base_dir, "database/research_papers.db")
+        # recommender.citation_fetcher.db_path = os.path.join(base_dir, "database/citations.db")
         
         # Load existing index if available
         try:
-            recommender.load_index("research_index")
-            logger.info("Loaded existing research index")
+            index_path = os.path.join(base_dir, "research_index")
+            recommender.load_index(index_path)
+            logger.info(f"Loaded existing research index from {index_path}")
         except Exception as e:
             logger.warning(f"Could not load existing index: {e}")
         
-        logger.info("  Components initialized successfully")
+        logger.info("Components initialized successfully")
         yield
     except ImportError as e:
-        logger.error(f"   Failed to import required modules: {e}")
+        logger.error(f"Failed to import required modules: {e}")
         # Still start the app, but with limited functionality
         yield
     except Exception as e:
-        logger.error(f"   Error during initialization: {e}")
+        logger.error(f"Error during initialization: {e}")
         logger.error(traceback.format_exc())
         yield
     
@@ -94,13 +100,15 @@ async def lifespan(app: FastAPI):
     # Save the index on shutdown
     if recommender and recommender.embedding_system.index.ntotal > 0:
         try:
-            recommender.save_index("research_index")
-            logger.info("Saved research index")
+            index_path = os.path.join(base_dir, "research_index")
+            recommender.save_index(index_path)
+            logger.info(f"Saved research index to {index_path}")
         except Exception as e:
             logger.error(f"Error saving index: {e}")
     logger.info("Components shut down")
 
-# Initialize the API
+
+
 app = FastAPI(
     title="Research Paper Recommender API",
     description="API for searching and recommending research papers from arXiv",
@@ -215,7 +223,7 @@ class SeminalPapersRequest(BaseModel):
         return v
 
 class Paper(BaseModel):
-    id: str
+    id: str = Field(alias = 'paper_id')
     title: str
     abstract: str
     authors: List[str]
@@ -226,19 +234,22 @@ class Paper(BaseModel):
     quality_score: Optional[float] = None
     
     class Config:
-        schema_extra = {
-            "example": {
-                "id": "2301.12345",
-                "title": "Recent Advances in Transformer Models",
-                "abstract": "This paper explores the recent advances in transformer architecture...",
-                "authors": ["J. Smith", "A. Lee"],
-                "published": "2023-01-15",
-                "pdf_url": "https://arxiv.org/pdf/2301.12345.pdf",
-                "categories": ["cs.LG", "cs.CL"],
-                "similarity": 0.92,
-                "quality_score": 0.85
+        model_config = {
+            "json_schema_extra": {
+                "example": {
+                    "id": "2301.12345",
+                    "title": "Recent Advances in Transformer Models",
+                    "abstract": "This paper explores the recent advances in transformer architecture...",
+                    "authors": ["J. Smith", "A. Lee"],
+                    "published": "2023-01-15",
+                    "pdf_url": "https://arxiv.org/pdf/2301.12345.pdf",
+                    "categories": ["cs.LG", "cs.CL"],
+                    "similarity": 0.92,
+                    "quality_score": 0.85
+                }
             }
         }
+
 
 class ApiStatus(BaseModel):
     status: str
@@ -272,63 +283,49 @@ async def search_papers(
     background_tasks: BackgroundTasks,
     _: bool = Depends(verify_components)
 ):
-    """
-    Search for papers based on a query and optional filters
-    """
     logger.info(f"Received search request: {request.dict()}")
+    
     try:
-        # Prepare date parameters if provided
-        date_start = None
-        date_end = None
-        if request.date_range:
-            date_start = request.date_range.start_date
-            date_end = request.date_range.end_date
-        
-        # Build the query with categories if provided
+        date_start = request.date_range.start_date if request.date_range else None
+        date_end = request.date_range.end_date if request.date_range else None
+
         final_query = request.query
         if request.categories:
             cat_query = " OR ".join([f"cat:{cat}" for cat in request.categories])
             final_query = f"({request.query}) AND ({cat_query})"
-        
-        # Fetch papers using the recommender
-        start_time = time.time()
+
         papers_df = recommender.fetch_and_index(
-            query=final_query, 
+            query=final_query,
             max_results=request.max_results,
             date_start=date_start,
             date_end=date_end
         )
-        fetch_time = time.time() - start_time
-        logger.info(f"Fetched {len(papers_df)} papers in {fetch_time:.2f} seconds")
-        
+
         if papers_df.empty:
             logger.warning(f"No papers found for query: {final_query}")
             return []
-        
-        # Ensure date is properly formatted as string
-        papers_df['published'] = papers_df['published'].astype(str)
-        
-        # Convert DataFrame to list of Paper models
+
+        # Convert DataFrame to list of Paper models with proper deserialization
         papers = []
         for _, row in papers_df.iterrows():
             paper = Paper(
-                id=row['id'],
+                id=row['paper_id'],
                 title=row['title'],
                 abstract=row['abstract'],
-                authors=row['authors'],
-                published=row['published'],
+                authors=json.loads(row['authors']) if isinstance(row['authors'], str) else row['authors'],
+                published=str(row['published']),
                 pdf_url=row.get('pdf_url'),
-                categories=row.get('categories', [])
+                categories=json.loads(row['categories']) if isinstance(row.get('categories'), str) else row.get('categories', [])
             )
             papers.append(paper)
-            
+
         return papers
-        
+
     except Exception as e:
         logger.error(f"Error in search_papers: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"Error processing search request: {str(e)}"
         )
 

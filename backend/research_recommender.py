@@ -10,6 +10,7 @@ import json
 import requests
 from bs4 import BeautifulSoup
 import time
+import sqlite3
 from sentence_transformers import SentenceTransformer
 from tenacity import retry, stop_after_attempt, wait_exponential
 from nltk.tokenize import word_tokenize
@@ -129,13 +130,45 @@ class CitationFetcher:
     Fetches citation information for papers to determine their impact and quality.
     """
     
-    def __init__(self):
+    def __init__(self, db_path="researchitreact/backend/database/citations.db"):
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        # Cache to avoid repeated requests
         self.citation_cache = {}
+        self.conn = sqlite3.connect(db_path)
+        self.create_citation_table()
+        self.create_author_table()
     
+    def create_citation_table(self):
+        query = """
+        CREATE TABLE IF NOT EXISTS citations (
+            paper_id TEXT PRIMARY KEY,
+            citation_count INTEGER,
+            influential_citations INTEGER,
+            venue TEXT,
+            last_updated TEXT,
+            h_index REAL,
+            journal_impact REAL,
+            quality_score REAL DEFAULT 0.0
+        )
+        """
+        self.conn.execute(query)
+        self.conn.commit()
+    
+    def create_author_table(self):
+        query = """
+        CREATE TABLE IF NOT EXISTS author_metrics (
+            authors_key TEXT PRIMARY KEY,
+            max_h_index REAL,
+            avg_h_index REAL,
+            total_citations INTEGER,
+            last_updated TEXT
+        )
+        """
+        self.conn.execute(query)
+        self.conn.commit()
+        
+        
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def get_citation_count(self, paper_id: str, title: str = None) -> dict:
         """
@@ -151,8 +184,24 @@ class CitationFetcher:
         # Check cache first
         if paper_id in self.citation_cache:
             return self.citation_cache[paper_id]
+
+        # Check database next
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM citations WHERE paper_id = ?", (paper_id,))
+        result = cursor.fetchone()
+        
+        if result:
+            # Convert database row to dictionary
+            column_names = [description[0] for description in cursor.description]
+            metrics = {column_names[i]: result[i] for i in range(len(column_names))}
             
+            # Add to cache
+            self.citation_cache[paper_id] = metrics
+            logger.info(f"Retrieved citation data from database for {paper_id}")
+            return metrics
+                
         metrics = {
+            'paper_id': paper_id,
             'citation_count': 0,
             'h_index': 0,
             'journal_impact': 0.0,
@@ -174,6 +223,20 @@ class CitationFetcher:
                 # Store venue information if available
                 if 'venue' in data and data['venue']:
                     metrics['venue'] = data['venue']
+                    
+                # Store in database
+                cursor.execute("""
+                    INSERT OR REPLACE INTO citations 
+                    (paper_id, citation_count, influential_citations, venue, last_updated)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    paper_id, 
+                    metrics['citation_count'],
+                    metrics.get('influential_citations', 0),
+                    metrics.get('venue', ''),
+                    metrics['last_updated']
+                ))
+                self.conn.commit()
                     
                 # Store in cache
                 self.citation_cache[paper_id] = metrics
@@ -209,12 +272,38 @@ class CitationFetcher:
                                 if citation_match:
                                     metrics['citation_count'] = int(citation_match.group(1))
                                     logger.info(f"Retrieved citation data from Google Scholar for {paper_id}: {metrics['citation_count']} citations")
+                                    
+                                    # Store in database
+                                    cursor.execute("""
+                                        INSERT OR REPLACE INTO citations 
+                                        (paper_id, citation_count, last_updated)
+                                        VALUES (?, ?, ?)
+                                    """, (
+                                        paper_id, 
+                                        metrics['citation_count'],
+                                        metrics['last_updated']
+                                    ))
+                                    self.conn.commit()
                                     break
             except Exception as e:
                 logger.warning(f"Error fetching citation data from Google Scholar for {paper_id}: {e}")
         
-        # Store in cache
+        # Store in cache and database (even if we couldn't find citations)
         self.citation_cache[paper_id] = metrics
+        
+        # Make sure we store the empty result too
+        if metrics['citation_count'] == 0:
+            cursor.execute("""
+                INSERT OR REPLACE INTO citations 
+                (paper_id, citation_count, last_updated)
+                VALUES (?, ?, ?)
+            """, (
+                paper_id, 
+                metrics['citation_count'],
+                metrics['last_updated']
+            ))
+            self.conn.commit()
+            
         return metrics
     
     def _title_similarity(self, title1: str, title2: str) -> float:
@@ -246,29 +335,126 @@ class CitationFetcher:
         
         return intersection / union if union > 0 else 0.0
     
+    
+    def __del__(self):
+        """Close database connection when object is destroyed"""
+        if hasattr(self, 'conn') and self.conn:
+            self.conn.close()
+        
+        
     def get_author_impact(self, authors: List[str]) -> dict:
-        """
-        Get impact metrics for paper authors
+    """
+    Get impact metrics for paper authors
+    
+    Args:
+        authors: List of author names
         
-        Args:
-            authors: List of author names
+    Returns:
+        Dictionary with author impact metrics
+    """
+    # Create a key to identify this set of authors
+    authors_key = "-".join(sorted(authors))
+    
+    # Check database first
+    try:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM author_metrics WHERE authors_key = ?", (authors_key,))
+            result = cursor.fetchone()
             
-        Returns:
-            Dictionary with author impact metrics
-        """
-        # This is a simplified implementation
-        # In a production system, you would query academic databases
-        
-        impact_metrics = {
-            'max_h_index': 0,
-            'avg_h_index': 0,
-            'total_citations': 0
-        }
-        
-        # Real implementation would query academic APIs or databases
-        # For example: Semantic Scholar, Google Scholar, or ORCID
-        
-        return impact_metrics
+            if result:
+                # Convert database row to dictionary
+                column_names = [description[0] for description in cursor.description]
+                metrics = {column_names[i]: result[i] for i in range(len(column_names))}
+                
+                # Check if data is recent (within 30 days)
+                last_updated = datetime.datetime.fromisoformat(metrics['last_updated'])
+                days_since_update = (datetime.datetime.now() - last_updated).days
+                
+                if days_since_update < 30:
+                    logger.info(f"Using cached author metrics for {authors_key}")
+                    return metrics
+    except Exception as e:
+        logger.warning(f"Error querying author metrics from database: {e}")
+    
+    # Default metrics
+    impact_metrics = {
+        'authors_key': authors_key,
+        'max_h_index': 0,
+        'avg_h_index': 0,
+        'total_citations': 0,
+        'last_updated': datetime.datetime.now().isoformat()
+    }
+    
+    # Fetch metrics for each author
+    h_indices = []
+    total_citations = 0
+    
+    for author in authors:
+        try:
+            # Normalize author name
+            author_name = author.strip().lower()
+            
+            # Try Semantic Scholar API first
+            url = f"https://api.semanticscholar.org/v1/author/search?query={author_name}"
+            response = requests.get(url, headers=self.headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('data') and len(data['data']) > 0:
+                    # Get the first (most relevant) author
+                    author_data = data['data'][0]
+                    author_id = author_data.get('authorId')
+                    
+                    if author_id:
+                        # Get detailed author data
+                        author_url = f"https://api.semanticscholar.org/v1/author/{author_id}"
+                        author_response = requests.get(author_url, headers=self.headers, timeout=10)
+                        
+                        if author_response.status_code == 200:
+                            detailed_data = author_response.json()
+                            
+                            # Extract h-index and citation count if available
+                            h_index = detailed_data.get('hIndex', 0)
+                            citations = detailed_data.get('citationCount', 0)
+                            
+                            h_indices.append(h_index)
+                            total_citations += citations
+                            
+                            # Sleep to avoid rate limiting
+                            time.sleep(1)
+            
+            # Fallback method: try to estimate h-index from recent publications
+            # This would require additional implementation in a production system
+            
+        except Exception as e:
+            logger.warning(f"Error fetching impact data for author {author}: {e}")
+    
+    # Update metrics based on what we found
+    if h_indices:
+        impact_metrics['max_h_index'] = max(h_indices)
+        impact_metrics['avg_h_index'] = sum(h_indices) / len(h_indices)
+        impact_metrics['total_citations'] = total_citations
+    
+    # Store in database
+    try:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO author_metrics 
+                (authors_key, max_h_index, avg_h_index, total_citations, last_updated)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                authors_key,
+                impact_metrics['max_h_index'],
+                impact_metrics['avg_h_index'],
+                impact_metrics['total_citations'],
+                impact_metrics['last_updated']
+            ))
+    except Exception as e:
+        logger.warning(f"Error storing author metrics in database: {e}")
+    
+    return impact_metrics
 
 
 class PaperQualityAssessor:
@@ -375,6 +561,57 @@ class PaperQualityAssessor:
         else:
             return max(0.1, 0.4 - (days_old - 1095) / 10000)
     
+    def update_quality_scores_in_db(self, paper_ids=None, db_path="researchitreact/backend/database/citations.db"):
+        """
+        Update quality scores for papers in the database
+        
+        Args:
+            paper_ids: List of paper IDs to update, or None for all papers
+            db_path: Path to the database
+        """
+        # Connect to database
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Get papers to update
+        if paper_ids:
+            placeholders = ', '.join(['?'] * len(paper_ids))
+            cursor.execute(f"SELECT paper_id FROM papers WHERE paper_id IN ({placeholders})", paper_ids)
+        else:
+            cursor.execute("SELECT paper_id FROM papers")
+            
+        papers_to_update = [row[0] for row in cursor.fetchall()]
+        logger.info(f"Updating quality scores for {len(papers_to_update)} papers")
+        
+        # Update scores
+        for paper_id in papers_to_update:
+            # Get paper data
+            cursor.execute("SELECT * FROM papers WHERE paper_id = ?", (paper_id,))
+            paper_data = cursor.fetchone()
+            
+            if not paper_data:
+                continue
+                
+            # Convert to dict format expected by assess_paper_quality
+            column_names = [description[0] for description in cursor.description]
+            paper = {column_names[i]: paper_data[i] for i in range(len(column_names))}
+            
+            # Calculate quality score
+            quality_score = self.assess_paper_quality(paper)
+            
+            # Update in database
+            cursor.execute(
+                "UPDATE citations SET quality_score = ? WHERE paper_id = ?",
+                (quality_score, paper_id)
+            )
+        
+        # Commit changes and close
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"Updated quality scores for {len(papers_to_update)} papers")
+    
+    
     def _assess_venue_quality(self, venue: str) -> float:
         """Assess quality of publication venue"""
         # This is a simplified implementation
@@ -445,14 +682,80 @@ class ArxivFetcher:
     Implements retry mechanism for reliability.
     """
     
-    def __init__(self):
-        self.preprocessor = TextPreprocessor()
+    def __init__(self,db_path = "researchitreact/backend/database/research_papers.db"):
+        self.conn = sqlite3.connect(db_path)
+        self.create_table()
     
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def fetch(self, query: str = "cat:cs.LG", max_results: int = 100, date_start: Optional[str] = None, date_end: Optional[str] = None, sort_by: arxiv.SortCriterion = arxiv.SortCriterion.Relevance) -> pd.DataFrame:
-        logger.info(f"Fetching {max_results} papers for query: {query}")
+    def create_table(self):
+        query = """
+        CREATE TABLE IF NOT EXISTS papers (
+            paper_id TEXT PRIMARY KEY,
+            title TEXT, 
+            abstract TEXT,
+            authors TEXT, 
+            primary_category TEXT, 
+            categories TEXT,
+            published DATE,
+            pdf_url TEXT,
+            source TEXT,
+            added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        self.conn.execute(query)
+        self.conn.commit()
+        
+    def __del__(self):
+        """Close database connection when object is destroyed"""
+        if hasattr(self, 'conn') and self.conn:
+            self.conn.close()
 
-        # Initialize client with conservative rate-limiting
+    def fetch_store(self, query="cat:cs.LG", max_results=100):
+        """Fetch papers and store only new ones in the database."""
+
+        # Step 1: Fetch new papers
+        df = self.fetch(query=query, max_results=max_results)
+        
+        if df.empty:
+            print("⚠️ No papers retrieved! Skipping storage.")
+            return df  # Return empty DataFrame if nothing fetched
+
+        # Step 2: Get already stored paper IDs
+        existing_papers = pd.read_sql("SELECT paper_id FROM papers", self.conn)
+        existing_ids = set(existing_papers["paper_id"])
+
+        # Rename 'id' column to 'paper_id' to match database schema
+        if 'id' in df.columns and 'paper_id' not in df.columns:
+            df = df.rename(columns={'id': 'paper_id'})
+
+        # Step 3: Filter out papers that are already stored
+        new_df = df[~df["paper_id"].isin(existing_ids)]
+
+        if new_df.empty:
+            print("🔄 All fetched papers are already stored. No new papers added.")
+        else:
+            # Step 4: Store only new papers
+            new_df.to_sql("papers", self.conn, if_exists="append", index=False)
+            print(f"✅ Stored {len(new_df)} new papers.")
+
+        return new_df
+
+        
+    def check_database(self):
+        """retrieve stored papers"""   
+        query = "SELECT * FROM papers"
+        return pd.read_sql(query,self.conn)
+        
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def fetch(self, query: str = "cat:cs.LG", max_results: int = 100, 
+          date_start: Optional[str] = None, date_end: Optional[str] = None, 
+          sort_by: arxiv.SortCriterion = arxiv.SortCriterion.Relevance) -> pd.DataFrame:
+    
+        logger.info(f"Fetching {max_results} papers for query: {query}")
+        
+        # Construct the query string with date filters if available
+        if date_start and date_end:
+            query += f' AND submittedDate:[{date_start} TO {date_end}]'
+
         client = arxiv.Client(page_size=100, delay_seconds=3)
         search = arxiv.Search(query=query, max_results=max_results, sort_by=sort_by)
 
@@ -460,20 +763,21 @@ class ArxivFetcher:
             results = list(client.results(search))
             logger.info(f"Total papers fetched: {len(results)}")
 
-            if len(results) == 0:
+            if not results:
                 logger.warning("⚠️ No papers retrieved! Check query or network connection.")
                 return pd.DataFrame()
 
             papers = []
             for result in results:
+                # Inside ArxivFetcher.fetch() method, modify the paper dictionary:
                 paper = {
-                    'id': result.entry_id.split('/')[-1],
+                    'paper_id': result.entry_id.split('/')[-1],
                     'title': result.title,
                     'abstract': result.summary,
-                    'authors': [a.name for a in result.authors],
+                    'authors': json.dumps([a.name for a in result.authors]),  # Convert to JSON string
                     'primary_category': result.primary_category,
-                    'categories': result.categories,
-                    'published': result.published.date(),
+                    'categories': json.dumps(result.categories),  # Convert to JSON string
+                    'published': result.published.date().isoformat(),  # Convert to string
                     'pdf_url': result.pdf_url,
                     'source': 'arxiv'
                 }
@@ -486,6 +790,7 @@ class ArxivFetcher:
         except Exception as e:
             logger.error(f"❌ Error fetching papers: {e}")
             return pd.DataFrame()
+
 
     def search_by_keywords(self, 
                           keywords: List[str], 
@@ -508,7 +813,28 @@ class ArxivFetcher:
         """
         # Build keyword part of query
         keyword_query = " AND ".join([f"all:{kw}" for kw in keywords])
-        
+        if not keywords or not isinstance(keywords, list):
+            logger.error("Keywords must be a non-empty list")
+            return pd.DataFrame()
+    
+        if max_results <= 0 or max_results > 1000:
+            logger.warning(f"Invalid max_results: {max_results}. Using default of 100.")
+            max_results = 100
+            
+        # Validate date format
+        if date_start:
+            try:
+                datetime.datetime.strptime(date_start, "%Y-%m-%d")
+            except ValueError:
+                logger.warning(f"Invalid date_start format: {date_start}. Using None.")
+                date_start = None
+                
+        if date_end:
+            try:
+                datetime.datetime.strptime(date_end, "%Y-%m-%d")
+            except ValueError:
+                logger.warning(f"Invalid date_end format: {date_end}. Using None.")
+                date_end = None
         # Add categories if specified
         if categories:
             cat_query = " OR ".join([f"cat:{cat}" for cat in categories])
@@ -545,6 +871,7 @@ class ArxivFetcher:
             max_results=max_results,
             sort_by=arxiv.SortCriterion.SubmittedDate
         )
+
 
 class EmbeddingSystem:
     """
@@ -890,7 +1217,7 @@ class ResearchRecommender:
     """
     
     def __init__(self, embedding_model: str = 'all-MiniLM-L6-v2'):
-        self.fetcher = ArxivFetcher()
+        self.fetcher = ArxivFetcher(db_path="researchitreact/backend/database/research_papers.db")
         self.embedding_system = EmbeddingSystem(model_name=embedding_model)
         self.preprocessor = TextPreprocessor()
         self.citation_fetcher = CitationFetcher()
@@ -938,7 +1265,7 @@ class ResearchRecommender:
         logger.info(f"Fetching papers with query: {query}")
 
         # Now passing date_start and date_end correctly to fetch()
-        papers = self.fetcher.fetch(query=query, max_results=max_results, date_start=date_start, date_end=date_end)
+        papers = self.fetcher.fetch_store(query=query, max_results=max_results, date_start=date_start, date_end=date_end)
 
         if papers.empty:
             logger.warning("⚠️ No papers found! Expanding search...")
