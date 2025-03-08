@@ -4,6 +4,7 @@ import pandas as pd
 import datetime
 from typing import List, Optional
 import arxiv
+import os
 import logging
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -18,7 +19,6 @@ class ArxivFetcher:
     
     def __init__(self, db_path=None):
         if db_path is None:
-            import os
             # Get the directory of the current script
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             db_path = os.path.join(base_dir, "database", "research_papers.db")
@@ -52,15 +52,17 @@ class ArxivFetcher:
         if hasattr(self, 'conn') and self.conn:
             self.conn.close()
 
-    def fetch_store(self, query="cat:cs.LG", max_results=100):
+    def fetch_store(self, query="cat:cs.LG", max_results=100, force_refresh: bool = False):
         """Fetch papers and store only new ones in the database."""
-
+        
         # Step 1: Fetch new papers
         df = self.fetch(query=query, max_results=max_results)
         
         if df.empty:
             print("⚠️ No papers retrieved! Skipping storage.")
-            return df  # Return empty DataFrame if nothing fetched
+            print(f"Query used: {query}")
+            return df  # Debugging query issues
+
 
         # Step 2: Get already stored paper IDs
         existing_papers = pd.read_sql("SELECT paper_id FROM papers", self.conn)
@@ -68,14 +70,17 @@ class ArxivFetcher:
 
         # Rename 'id' column to 'paper_id' to match database schema
         if 'id' in df.columns and 'paper_id' not in df.columns:
-            df = df.rename(columns={'id': 'paper_id'})  # ✅ Ensure correct naming
+            df = df.rename(columns={'id': 'paper_id'})
 
-
-        # Step 3: Filter out papers that are already stored
+        # 🔹 If force_refresh is enabled, do not filter out already stored papers
+        # Always filter out papers that are already in the database
         new_df = df[~df["paper_id"].isin(existing_ids)]
+
 
         if new_df.empty:
             print("🔄 All fetched papers are already stored. No new papers added.")
+            print(f"Existing IDs: {existing_ids}")  # Debugging stored papers
+
         else:
             # Step 4: Store only new papers
             new_df.to_sql("papers", self.conn, if_exists="append", index=False)
@@ -83,10 +88,19 @@ class ArxivFetcher:
 
         return new_df
 
+
+
     def check_database(self):
-        """retrieve stored papers"""   
+        """Retrieve stored papers and export to CSV"""
         query = "SELECT * FROM papers"
-        return pd.read_sql(query, self.conn)
+        df = pd.read_sql(query, self.conn)
+        
+        if not df.empty:
+            df.to_csv("research_papers.db", index=False)
+            print("📄 Research papers saved to stored_papers.csv for readability.")
+        
+        return df
+
         
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def fetch(self, query: str = "cat:cs.LG", max_results: int = 100, 
@@ -108,7 +122,10 @@ class ArxivFetcher:
 
             if not results:
                 logger.warning("⚠️ No papers retrieved! Check query or network connection.")
-                return pd.DataFrame()
+                return pd.DataFrame()  # ✅ Return empty DataFrame instead of recursive call
+     
+# Debugging step to check if papers are being fetched
+
 
             papers = []
             for result in results:

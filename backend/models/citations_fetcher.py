@@ -61,14 +61,7 @@ class CitationsFetcher:
     
     def get_citation_count(self, paper_id: str, title: Optional[str] = None) -> Dict[str, Any]:
         """
-        Get citation count for a paper from database or external API
-        
-        Args:
-            paper_id: ID of the paper
-            title: Title of the paper (optional, for better matching)
-            
-        Returns:
-            Dictionary with citation information
+        Get citation count for a paper from the database or external API.
         """
         # First check if we have recent data in our database
         cursor = self.conn.cursor()
@@ -78,12 +71,8 @@ class CitationsFetcher:
         )
         result = cursor.fetchone()
         
-        # If we have recent data (less than 7 days old), return it
         if result:
             citation_count, influential_citations, venue, quality_score, last_updated = result
-            
-            # For demonstration, return cached data
-            # In production, you might want to refresh data older than a certain threshold
             return {
                 "paper_id": paper_id,
                 "citation_count": citation_count,
@@ -92,13 +81,19 @@ class CitationsFetcher:
                 "quality_score": quality_score
             }
         
-        # If no cached data, we would normally fetch from an external API
-        # For this example, we'll simulate citation data
-        citation_count = self._simulate_citation_count(paper_id, title)
-        influential_citations = int(citation_count * 0.3)  # Simulate that 30% are influential
-        venue = self._extract_venue_from_title(title) if title else ""
+        # Attempt to fetch real citation data from Semantic Scholar
+        citation_data = self.fetch_real_citation_data(paper_id)
+        if citation_data:
+            citation_count = citation_data.get("citationCount", 0)
+            influential_citations = citation_data.get("influentialCitationCount", 0)
+            venue = citation_data.get("venue", "")
+        else:
+            # Fallback: use simulation if real data not available
+            citation_count = self._simulate_citation_count(paper_id, title)
+            influential_citations = int(citation_count * 0.3)
+            venue = self._extract_venue_from_title(title) if title else ""
         
-        # Store in database
+        # Store the retrieved data in the database
         cursor.execute(
             "INSERT OR REPLACE INTO citations (paper_id, citation_count, influential_citations, venue) VALUES (?, ?, ?, ?)",
             (paper_id, citation_count, influential_citations, venue)
@@ -110,7 +105,7 @@ class CitationsFetcher:
             "citation_count": citation_count,
             "influential_citations": influential_citations,
             "venue": venue,
-            "quality_score": quality_score
+            "quality_score": 0.5  # Or adjust this default if needed
         }
 
     
@@ -233,3 +228,25 @@ class CitationsFetcher:
         
         # Base h-index on hash (between 1 and 50)
         return (hash_int % 50) + 1
+    
+    def fetch_real_citation_data(self, paper_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch real citation data from Semantic Scholar for a given paper.
+        The paper_id is assumed to be an arXiv ID.
+        """
+        import requests
+        try:
+            # Construct Semantic Scholar API ID for arXiv papers
+            api_id = f"ARXIV:{paper_id}"
+            url = f"https://api.semanticscholar.org/graph/v1/paper/{api_id}?fields=citationCount,influentialCitationCount,venue"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.warning("Semantic Scholar API returned status code: {}".format(response.status_code))
+                return None
+        except Exception as e:
+            logger.error("Error fetching citation data from Semantic Scholar: {}".format(e))
+            return None
+
+

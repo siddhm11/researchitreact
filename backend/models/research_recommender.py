@@ -80,66 +80,63 @@ class ResearchRecommender:
     
     def fetch_and_index(self, query: str, max_results: int = 50,
                         date_start: Optional[str] = None,
-                        date_end: Optional[str] = None) -> pd.DataFrame:
+                        date_end: Optional[str] = None,
+                        force_refresh: bool = False) -> pd.DataFrame:
         """
-        Fetch papers based on query and index them for later retrieval
+        Fetch papers based on query and index them for later retrieval.
+        
         Args:
-            query (str): ArXiv search query
-            max_results (int): Maximum number of results to return
-            date_start (str, optional): Start date in YYYY-MM-DD format
-            date_end (str, optional): End date in YYYY-MM-DD format
+            query (str): ArXiv search query.
+            max_results (int): Maximum number of results to return.
+            date_start (str, optional): Start date in YYYY-MM-DD format.
+            date_end (str, optional): End date in YYYY-MM-DD format.
+            force_refresh (bool, optional): If True, forces re-fetching even if papers exist.
+
         Returns:
-            pd.DataFrame: DataFrame containing the fetched papers
+            pd.DataFrame: DataFrame containing the fetched papers.
         """
         try:
-            self.logger.info(f"Fetching papers with query: {query}")
-            start_time = time.time()
-            papers_df = self.fetcher.fetch(
-                query=query,
-                max_results=max_results,
-                date_start=date_start,
-                date_end=date_end
-            )
+            self.logger.info(f"Fetching papers with query: {query}, max_results={max_results}")
             
-            fetch_time = time.time() - start_time
-            self.logger.info(f"Fetched {len(papers_df)} papers in {fetch_time:.2f} seconds")
+            # 🔹 Force refresh: Clear indexed papers to avoid skipping results
+            if force_refresh:
+                self._indexed_papers.clear()  # ✅ Clears previous indexing
             
+            # 🔹 Fetch new papers
+            papers_df = self.fetcher.fetch_store(query=query, max_results=max_results, force_refresh=force_refresh)
+
             if papers_df.empty:
-                return papers_df
-            
+                self.logger.warning(f"No new papers found for query: {query}")
+                return pd.DataFrame()
+
+            # 🔹 Index only new papers
             self._index_papers(papers_df)
-            
+
             return papers_df
+
         except Exception as e:
             self.logger.error(f"Error in fetch_and_index: {str(e)}")
             self.logger.error(traceback.format_exc())
             return pd.DataFrame()
+
     
     def _index_papers(self, papers_df: pd.DataFrame) -> None:
-        """
-        Index papers for later retrieval
-        Args:
-            papers_df (pd.DataFrame): DataFrame containing papers to index
-        """
         if papers_df.empty:
             return
         
         paper_id_col = 'paper_id' if 'paper_id' in papers_df.columns else 'id'
         to_index_df = papers_df[~papers_df[paper_id_col].isin(self._indexed_papers)]
-        
+
         if to_index_df.empty:
             self.logger.info("All papers are already indexed")
-            return
-        
+            return  # ⛔ If all papers are already indexed, the next search will return nothing!
+
         self.logger.info(f"Indexing {len(to_index_df)} new papers")
-        
         self.embedding_system.process_papers(to_index_df)
+
         for paper_id in to_index_df[paper_id_col]:
             self._indexed_papers.add(paper_id)
-
-            
-        self.logger.info(f"Successfully indexed {len(to_index_df)} papers")
-    
+ 
     def recommend(self, text: Optional[str] = None, paper_id: Optional[str] = None,
                   k: int = 5, min_date: Optional[str] = None,
                   max_date: Optional[str] = None, quality_aware: bool = True) -> pd.DataFrame:

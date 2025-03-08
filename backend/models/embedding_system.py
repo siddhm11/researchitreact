@@ -7,7 +7,7 @@ from sentence_transformers import SentenceTransformer
 from fuzzywuzzy import fuzz
 
 # You'll need to import the TextPreprocessor class that you'll create
-from .text_preprocessor import TextPreprocessor
+from models.text_preprocessor import TextPreprocessor
 
 # Set up logger
 logger = logging.getLogger(__name__)

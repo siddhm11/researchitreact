@@ -75,8 +75,8 @@ async def lifespan(app: FastAPI):
         
         # Ensure database paths are absolute
         # Uncomment if you have path issues:
-        # recommender.fetcher.db_path = os.path.join(base_dir, "database/research_papers.db")
-        # recommender.citation_fetcher.db_path = os.path.join(base_dir, "database/citations.db")
+        recommender.fetcher.db_path = os.path.join(base_dir, "database/research_papers.db")
+        recommender.citations_fetcher.db_path = os.path.join(base_dir, "database/citations.db")
         
         # Load existing index if available
         try:
@@ -297,11 +297,16 @@ async def search_papers(
             final_query = f"({request.query}) AND ({cat_query})"
 
         papers_df = recommender.fetch_and_index(
-            query=final_query,
-            max_results=request.max_results,
-            date_start=date_start,
-            date_end=date_end
+            query=final_query, 
+            max_results=request.max_results, 
+            date_start=date_start, 
+            date_end=date_end, 
+            force_refresh=True  
         )
+
+
+        logger.info(f"Fetched {len(papers_df)} papers from Arxiv API")
+        logger.info(papers_df.head())  # Print first few rows to debug
 
         if papers_df.empty:
             logger.warning(f"No papers found for query: {final_query}")
