@@ -28,7 +28,6 @@ class ArxivFetcher:
         
         self.conn = sqlite3.connect(db_path)
         self.create_table()
-        self.conn = sqlite3.connect(db_path)
 
     
     def create_table(self):
@@ -69,7 +68,8 @@ class ArxivFetcher:
 
         # Rename 'id' column to 'paper_id' to match database schema
         if 'id' in df.columns and 'paper_id' not in df.columns:
-            df = df.rename(columns={'id': 'paper_id'})
+            df = df.rename(columns={'id': 'paper_id'})  # ✅ Ensure correct naming
+
 
         # Step 3: Filter out papers that are already stored
         new_df = df[~df["paper_id"].isin(existing_ids)]
@@ -112,10 +112,9 @@ class ArxivFetcher:
 
             papers = []
             for result in results:
-                # Inside ArxivFetcher.fetch() method, modify the paper dictionary:
                 paper = {
                     'paper_id': result.entry_id.split('/')[-1],
-                    'title': result.title,
+                    'title': str(result.title).strip(),  # ✅ Ensure title is a string
                     'abstract': result.summary,
                     'authors': json.dumps([a.name for a in result.authors]),  # Convert to JSON string
                     'primary_category': result.primary_category,
@@ -124,6 +123,7 @@ class ArxivFetcher:
                     'pdf_url': result.pdf_url,
                     'source': 'arxiv'
                 }
+
                 papers.append(paper)
 
             df = pd.DataFrame(papers)

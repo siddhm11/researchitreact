@@ -224,15 +224,13 @@ class ResearchRecommender:
             Dict: Citation information
         """
         try:
-            # Get paper title for better citation lookup
             paper_df = self.fetcher.check_database()
             paper = paper_df[paper_df['paper_id'] == paper_id]
-            
             title = None
             if not paper.empty:
                 title = paper.iloc[0]['title']
+            return self.citations_fetcher.get_citation_count(paper_id, title)
             
-            return self.citation_fetcher.get_citation_count(paper_id, title)
         except Exception as e:
             self.logger.error(f"Error getting citation info for {paper_id}: {str(e)}")
             return {}

@@ -63,7 +63,9 @@ async def lifespan(app: FastAPI):
     try:
         # Import the ResearchRecommender class from your new package structure
         from models.research_recommender import ResearchRecommender
+        from models.citations_fetcher import CitationsFetcher
         
+ 
         global recommender
         # Set the current directory as base for relative paths
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -223,7 +225,7 @@ class SeminalPapersRequest(BaseModel):
         return v
 
 class Paper(BaseModel):
-    id: str = Field(alias = 'paper_id')
+    paper_id: str 
     title: str
     abstract: str
     authors: List[str]
@@ -306,18 +308,21 @@ async def search_papers(
             return []
 
         # Convert DataFrame to list of Paper models with proper deserialization
+        # Convert DataFrame to list of Paper models
         papers = []
         for _, row in papers_df.iterrows():
-            paper = Paper(
-                id=row['paper_id'],
-                title=row['title'],
-                abstract=row['abstract'],
+            papers.append(Paper(
+                paper_id=row.get('paper_id', row.get('id', 'unknown_id')),  # ✅ Ensure `paper_id` exists
+                title=str(row['title']).strip(),
+                abstract=str(row['abstract']).strip(),
                 authors=json.loads(row['authors']) if isinstance(row['authors'], str) else row['authors'],
                 published=str(row['published']),
                 pdf_url=row.get('pdf_url'),
                 categories=json.loads(row['categories']) if isinstance(row.get('categories'), str) else row.get('categories', [])
-            )
-            papers.append(paper)
+            ))
+
+
+
 
         return papers
 

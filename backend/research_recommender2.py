@@ -343,118 +343,118 @@ class CitationFetcher:
         
         
     def get_author_impact(self, authors: List[str]) -> dict:
-    """
-    Get impact metrics for paper authors
-    
-    Args:
-        authors: List of author names
+        """
+        Get impact metrics for paper authors
         
-    Returns:
-        Dictionary with author impact metrics
-    """
-    # Create a key to identify this set of authors
-    authors_key = "-".join(sorted(authors))
-    
-    # Check database first
-    try:
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM author_metrics WHERE authors_key = ?", (authors_key,))
-            result = cursor.fetchone()
+        Args:
+            authors: List of author names
             
-            if result:
-                # Convert database row to dictionary
-                column_names = [description[0] for description in cursor.description]
-                metrics = {column_names[i]: result[i] for i in range(len(column_names))}
-                
-                # Check if data is recent (within 30 days)
-                last_updated = datetime.datetime.fromisoformat(metrics['last_updated'])
-                days_since_update = (datetime.datetime.now() - last_updated).days
-                
-                if days_since_update < 30:
-                    logger.info(f"Using cached author metrics for {authors_key}")
-                    return metrics
-    except Exception as e:
-        logger.warning(f"Error querying author metrics from database: {e}")
-    
-    # Default metrics
-    impact_metrics = {
-        'authors_key': authors_key,
-        'max_h_index': 0,
-        'avg_h_index': 0,
-        'total_citations': 0,
-        'last_updated': datetime.datetime.now().isoformat()
-    }
-    
-    # Fetch metrics for each author
-    h_indices = []
-    total_citations = 0
-    
-    for author in authors:
+        Returns:
+            Dictionary with author impact metrics
+        """
+        # Create a key to identify this set of authors
+        authors_key = "-".join(sorted(authors))
+        
+        # Check database first
         try:
-            # Normalize author name
-            author_name = author.strip().lower()
-            
-            # Try Semantic Scholar API first
-            url = f"https://api.semanticscholar.org/v1/author/search?query={author_name}"
-            response = requests.get(url, headers=self.headers, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('data') and len(data['data']) > 0:
-                    # Get the first (most relevant) author
-                    author_data = data['data'][0]
-                    author_id = author_data.get('authorId')
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM author_metrics WHERE authors_key = ?", (authors_key,))
+                result = cursor.fetchone()
+                
+                if result:
+                    # Convert database row to dictionary
+                    column_names = [description[0] for description in cursor.description]
+                    metrics = {column_names[i]: result[i] for i in range(len(column_names))}
                     
-                    if author_id:
-                        # Get detailed author data
-                        author_url = f"https://api.semanticscholar.org/v1/author/{author_id}"
-                        author_response = requests.get(author_url, headers=self.headers, timeout=10)
-                        
-                        if author_response.status_code == 200:
-                            detailed_data = author_response.json()
-                            
-                            # Extract h-index and citation count if available
-                            h_index = detailed_data.get('hIndex', 0)
-                            citations = detailed_data.get('citationCount', 0)
-                            
-                            h_indices.append(h_index)
-                            total_citations += citations
-                            
-                            # Sleep to avoid rate limiting
-                            time.sleep(1)
-            
-            # Fallback method: try to estimate h-index from recent publications
-            # This would require additional implementation in a production system
-            
+                    # Check if data is recent (within 30 days)
+                    last_updated = datetime.datetime.fromisoformat(metrics['last_updated'])
+                    days_since_update = (datetime.datetime.now() - last_updated).days
+                    
+                    if days_since_update < 30:
+                        logger.info(f"Using cached author metrics for {authors_key}")
+                        return metrics
         except Exception as e:
-            logger.warning(f"Error fetching impact data for author {author}: {e}")
-    
-    # Update metrics based on what we found
-    if h_indices:
-        impact_metrics['max_h_index'] = max(h_indices)
-        impact_metrics['avg_h_index'] = sum(h_indices) / len(h_indices)
-        impact_metrics['total_citations'] = total_citations
-    
-    # Store in database
-    try:
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO author_metrics 
-                (authors_key, max_h_index, avg_h_index, total_citations, last_updated)
-                VALUES (?, ?, ?, ?, ?)
-            """, (
-                authors_key,
-                impact_metrics['max_h_index'],
-                impact_metrics['avg_h_index'],
-                impact_metrics['total_citations'],
-                impact_metrics['last_updated']
-            ))
-    except Exception as e:
-        logger.warning(f"Error storing author metrics in database: {e}")
-    
-    return impact_metrics
+            logger.warning(f"Error querying author metrics from database: {e}")
+        
+        # Default metrics
+        impact_metrics = {
+            'authors_key': authors_key,
+            'max_h_index': 0,
+            'avg_h_index': 0,
+            'total_citations': 0,
+            'last_updated': datetime.datetime.now().isoformat()
+        }
+        
+        # Fetch metrics for each author
+        h_indices = []
+        total_citations = 0
+        
+        for author in authors:
+            try:
+                # Normalize author name
+                author_name = author.strip().lower()
+                
+                # Try Semantic Scholar API first
+                url = f"https://api.semanticscholar.org/v1/author/search?query={author_name}"
+                response = requests.get(url, headers=self.headers, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('data') and len(data['data']) > 0:
+                        # Get the first (most relevant) author
+                        author_data = data['data'][0]
+                        author_id = author_data.get('authorId')
+                        
+                        if author_id:
+                            # Get detailed author data
+                            author_url = f"https://api.semanticscholar.org/v1/author/{author_id}"
+                            author_response = requests.get(author_url, headers=self.headers, timeout=10)
+                            
+                            if author_response.status_code == 200:
+                                detailed_data = author_response.json()
+                                
+                                # Extract h-index and citation count if available
+                                h_index = detailed_data.get('hIndex', 0)
+                                citations = detailed_data.get('citationCount', 0)
+                                
+                                h_indices.append(h_index)
+                                total_citations += citations
+                                
+                                # Sleep to avoid rate limiting
+                                time.sleep(1)
+                
+                # Fallback method: try to estimate h-index from recent publications
+                # This would require additional implementation in a production system
+                
+            except Exception as e:
+                logger.warning(f"Error fetching impact data for author {author}: {e}")
+        
+        # Update metrics based on what we found
+        if h_indices:
+            impact_metrics['max_h_index'] = max(h_indices)
+            impact_metrics['avg_h_index'] = sum(h_indices) / len(h_indices)
+            impact_metrics['total_citations'] = total_citations
+        
+        # Store in database
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT OR REPLACE INTO author_metrics 
+                    (authors_key, max_h_index, avg_h_index, total_citations, last_updated)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    authors_key,
+                    impact_metrics['max_h_index'],
+                    impact_metrics['avg_h_index'],
+                    impact_metrics['total_citations'],
+                    impact_metrics['last_updated']
+                ))
+        except Exception as e:
+            logger.warning(f"Error storing author metrics in database: {e}")
+        
+        return impact_metrics
 
 
 class PaperQualityAssessor:
@@ -479,7 +479,7 @@ class PaperQualityAssessor:
         """
         # Get citation metrics
         citation_metrics = self.citation_fetcher.get_citation_count(
-            paper_id=paper['id'],
+            paper_id=paper['paper_id'] if 'paper_id' in paper else paper['id'],
             title=paper['title']
         )
         
@@ -489,28 +489,68 @@ class PaperQualityAssessor:
         
         # Consider venue quality if available
         venue_score = 0.0
-        if 'venue' in citation_metrics:
+        if 'venue' in citation_metrics and citation_metrics['venue']:
             venue_score = self._assess_venue_quality(citation_metrics['venue'])
-            
+        
         # Consider author impact
         author_score = 0.0
         if 'authors' in paper:
-            author_metrics = self.citation_fetcher.get_author_impact(paper['authors'])
-            author_score = min(author_metrics.get('max_h_index', 0) / 50, 1.0) * 0.5
+            # Handle authors in various formats
+            authors_list = []
+            if isinstance(paper['authors'], str):
+                try:
+                    authors_list = json.loads(paper['authors'])
+                except json.JSONDecodeError:
+                    # If it's not a JSON string, try comma-separated format
+                    authors_list = [a.strip() for a in paper['authors'].split(',')]
+            elif isinstance(paper['authors'], list):
+                authors_list = paper['authors']
             
+            if authors_list:
+                author_metrics = self.citation_fetcher.get_author_impact(authors_list)
+                # Scale author score based on h-index and normalize between 0-1
+                max_h_index = author_metrics.get('max_h_index', 0)
+                avg_h_index = author_metrics.get('avg_h_index', 0)
+                
+                # Use a weighted combination of max and average h-index
+                weighted_h_index = 0.7 * max_h_index + 0.3 * avg_h_index
+                
+                # Normalize: h-index of 40+ is considered very high (1.0 score)
+                author_score = min(weighted_h_index / 40, 1.0)
+        
         # Analysis of paper content
         content_score = self._analyze_paper_content(paper)
         
-        # Calculate weighted final score
-        # Weights can be adjusted based on importance of different factors
-        weights = {
-            'citation': 0.4,      # Citations strongly indicate quality
-            'recency': 0.2,       # Recent papers might be more relevant
-            'venue': 0.1,         # Published venue indicates peer review
-            'author': 0.1,        # Author reputation matters
-            'content': 0.2        # Content analysis for inherent quality
-        }
+        # Determine weights based on paper's age
+        if recency_score > 0.8:  # Very recent paper
+            # For recent papers, rely more on content and venue since citations will be low
+            weights = {
+                'citation': 0.2,
+                'recency': 0.3,
+                'venue': 0.2,
+                'author': 0.15,
+                'content': 0.15
+            }
+        else:  # Older papers
+            # For older papers, citations matter more
+            weights = {
+                'citation': 0.5,
+                'recency': 0.1,
+                'venue': 0.2,
+                'author': 0.1,
+                'content': 0.1
+            }
         
+        # Consider influential citations more heavily if available
+        if 'influential_citations' in citation_metrics and citation_metrics['influential_citations'] > 0:
+            # Normalize influential citations (these are more important than raw counts)
+            influential_ratio = citation_metrics['influential_citations'] / max(1, citation_metrics['citation_count'])
+            influential_score = min(1.0, influential_ratio * 2)  # Scale up: 50%+ influential is top score
+            
+            # Adjust citation score to include influential citations factor
+            citation_score = 0.7 * citation_score + 0.3 * influential_score
+        
+        # Calculate final weighted score
         quality_score = (
             weights['citation'] * citation_score +
             weights['recency'] * recency_score +
@@ -519,10 +559,25 @@ class PaperQualityAssessor:
             weights['content'] * content_score
         )
         
+        # Add bonus for papers with high citation count that are also recent
+        if citation_score > 0.7 and recency_score > 0.7:
+            quality_score += 0.1
+            
+        # Add bonus for papers from top authors in top venues
+        if author_score > 0.8 and venue_score > 0.8:
+            quality_score += 0.05
+        
         # Ensure score is between 0 and 1
         quality_score = max(0.0, min(1.0, quality_score))
         
-        logger.info(f"Quality score for {paper['id']}: {quality_score:.2f}")
+        # Log the score and its components
+        logger.info(f"Quality assessment for {paper.get('paper_id', paper.get('id', 'unknown'))}: " +
+                    f"Final={quality_score:.2f}, " +
+                    f"Citation={citation_score:.2f}, " +
+                    f"Recency={recency_score:.2f}, " +
+                    f"Venue={venue_score:.2f}, " +
+                    f"Author={author_score:.2f}, " +
+                    f"Content={content_score:.2f}")
         
         return quality_score
     
