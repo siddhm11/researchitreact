@@ -13,6 +13,7 @@ from typing import List, Dict, Optional, Union, Tuple
 import time
 import traceback
 
+from database.mongo_connector import MongoConnector
 from .text_preprocessor import TextPreprocessor
 from .embedding_system import EmbeddingSystem
 from .arxiv_fetcher import ArxivFetcher
