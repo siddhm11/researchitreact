@@ -28,14 +28,18 @@ class ResearchRecommender:
         self.logger = logger
         self.logger.info("Initializing Research Recommender")
         
+        # Create MongoDB connector first
+        self.mongo_connector = MongoConnector()
+        
         self.text_preprocessor = TextPreprocessor()
         self.embedding_system = EmbeddingSystem()
-        self.fetcher = ArxivFetcher()
-        self.citations_fetcher = CitationsFetcher()
+        self.fetcher = ArxivFetcher(mongo_connector=self.mongo_connector)
+        self.citations_fetcher = CitationsFetcher(mongo_connector=self.mongo_connector)
         self.quality_assessor = PaperQualityAssessor(citations_fetcher=self.citations_fetcher)
         
         self._indexed_papers = set()
         self.logger.info("Research Recommender initialized")
+
     
     def load_index(self, index_path: str) -> bool:
         """
