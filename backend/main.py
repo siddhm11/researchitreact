@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends, s
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any, Union
 import uvicorn
 import logging
@@ -56,35 +56,30 @@ API_SETTINGS = {
 recommender = None
 
 # Initialize components on startup and shutdown on app termination
+# Update the lifespan manager in main.py to properly initialize MongoDB components
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Initializing components...")
     try:
-        # Import the ResearchRecommender class from your new package structure
+        # Import the ResearchRecommender class
         from models.research_recommender import ResearchRecommender
-        from models.citations_fetcher import CitationsFetcher
         
- 
         global recommender
-        # Set the current directory as base for relative paths
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # Initialize the recommender with proper paths
+        # Initialize the recommender with MongoDB connection
         recommender = ResearchRecommender()
-        
-        # Ensure database paths are absolute
-        # Uncomment if you have path issues:
-        recommender.fetcher.db_path = os.path.join(base_dir, "database/research_papers.db")
-        recommender.citations_fetcher.db_path = os.path.join(base_dir, "database/citations.db")
         
         # Load existing index if available
         try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
             index_path = os.path.join(base_dir, "research_index")
+            os.makedirs(index_path, exist_ok=True)  # Ensure directory exists
             recommender.load_index(index_path)
             logger.info(f"Loaded existing research index from {index_path}")
         except Exception as e:
             logger.warning(f"Could not load existing index: {e}")
+            logger.warning(traceback.format_exc())
         
         logger.info("Components initialized successfully")
         yield
@@ -102,6 +97,7 @@ async def lifespan(app: FastAPI):
     # Save the index on shutdown
     if recommender and recommender.embedding_system.index.ntotal > 0:
         try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
             index_path = os.path.join(base_dir, "research_index")
             recommender.save_index(index_path)
             logger.info(f"Saved research index to {index_path}")
@@ -165,7 +161,7 @@ class DateRange(BaseModel):
     start_date: Optional[str] = Field(None, description="Start date in YYYY-MM-DD format")
     end_date: Optional[str] = Field(None, description="End date in YYYY-MM-DD format")
     
-    @validator('start_date', 'end_date')
+    @field_validator('start_date', 'end_date')
     def validate_date_format(cls, v):
         if v is not None:
             try:
@@ -181,7 +177,7 @@ class SearchRequest(BaseModel):
     date_range: Optional[DateRange] = Field(None, description="Optional date range for filtering papers")
     categories: Optional[List[str]] = Field(None, description="Optional list of arXiv categories to filter by")
     
-    @validator('max_results')
+    @field_validator('max_results')
     def validate_max_results(cls, v):
         if v < 1:
             return API_SETTINGS["default_max_results"]
@@ -197,7 +193,7 @@ class RecommendRequest(BaseModel):
     date_range: Optional[DateRange] = Field(None, description="Optional date range for filtering recommendations")
     quality_aware: bool = Field(True, description="Whether to use quality assessment in ranking")
     
-    @validator('k')
+    @field_validator('k')
     def validate_k(cls, v):
         if v < 1:
             return API_SETTINGS["default_recommendations"]
@@ -205,7 +201,7 @@ class RecommendRequest(BaseModel):
             return API_SETTINGS["max_allowed_results"]
         return v
     
-    @validator('text', 'paper_id')
+    @field_validator('text', 'paper_id')
     def validate_input(cls, v, values):
         # Ensure either text or paper_id is provided
         if 'text' not in values and 'paper_id' not in values:
@@ -216,7 +212,7 @@ class SeminalPapersRequest(BaseModel):
     topic: str = Field(..., description="Research topic to find seminal papers for")
     max_results: int = Field(10, description="Maximum number of papers to return")
     
-    @validator('max_results')
+    @field_validator('max_results')
     def validate_max_results(cls, v):
         if v < 1:
             return 10
@@ -296,38 +292,60 @@ async def search_papers(
             cat_query = " OR ".join([f"cat:{cat}" for cat in request.categories])
             final_query = f"({request.query}) AND ({cat_query})"
 
-        papers_df = recommender.fetch_and_index(
+        # Use fetch method directly if we just want to display results
+        # without storing in DB
+        papers_df = recommender.fetcher.fetch(
             query=final_query, 
             max_results=request.max_results, 
             date_start=date_start, 
-            date_end=date_end, 
-            force_refresh=True  
+            date_end=date_end
         )
-
+        
+        # Or use fetch_and_index if we want to store in DB and index for later retrieval
+        # papers_df = recommender.fetch_and_index(
+        #     query=final_query, 
+        #     max_results=request.max_results, 
+        #     date_start=date_start, 
+        #     date_end=date_end, 
+        #     force_refresh=True  
+        # )
 
         logger.info(f"Fetched {len(papers_df)} papers from Arxiv API")
-        logger.info(papers_df.head())  # Print first few rows to debug
-
+        
         if papers_df.empty:
             logger.warning(f"No papers found for query: {final_query}")
             return []
 
-        # Convert DataFrame to list of Paper models with proper deserialization
         # Convert DataFrame to list of Paper models
         papers = []
         for _, row in papers_df.iterrows():
+            # Handle both id and paper_id column names
+            paper_id = row.get('paper_id', row.get('id', 'unknown_id'))
+            
+            # Handle serialization of authors and categories
+            authors = row['authors']
+            if isinstance(authors, str):
+                try:
+                    authors = json.loads(authors)
+                except json.JSONDecodeError:
+                    authors = [authors]
+            
+            categories = row.get('categories', [])
+            if isinstance(categories, str):
+                try:
+                    categories = json.loads(categories)
+                except json.JSONDecodeError:
+                    categories = [categories]
+            
             papers.append(Paper(
-                paper_id=row.get('paper_id', row.get('id', 'unknown_id')),  # ✅ Ensure `paper_id` exists
+                paper_id=paper_id,
                 title=str(row['title']).strip(),
-                abstract=str(row['abstract']).strip(),
-                authors=json.loads(row['authors']) if isinstance(row['authors'], str) else row['authors'],
-                published=str(row['published']),
+                abstract=str(row.get('abstract', '')).strip(),
+                authors=authors,
+                published=str(row.get('published', '')),
                 pdf_url=row.get('pdf_url'),
-                categories=json.loads(row['categories']) if isinstance(row.get('categories'), str) else row.get('categories', [])
+                categories=categories
             ))
-
-
-
 
         return papers
 
@@ -338,7 +356,8 @@ async def search_papers(
             status_code=500,
             detail=f"Error processing search request: {str(e)}"
         )
-
+        
+        
 @app.post("/recommend", response_model=List[Paper])
 async def get_recommendations(
     request: RecommendRequest,
@@ -432,7 +451,7 @@ async def find_seminal_papers(
             quality_score = recommender.assess_paper_quality(row['id'])
             
             paper = Paper(
-                paper_id=row['id'],  # Change this from id=row['id'] to paper_id=row['id']
+                paper_id=row['id'],  
                 title=row['title'],
                 abstract=row['abstract'],
                 authors=row['authors'],
@@ -533,6 +552,5 @@ if __name__ == "__main__":
         port=8000, 
         reload=True,
         log_level="info",
-        workers=4,  # Adjust based on available CPU cores
         timeout_keep_alive=API_SETTINGS["request_timeout"]
     )

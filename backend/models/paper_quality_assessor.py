@@ -5,7 +5,7 @@ import json
 import numpy as np
 from typing import Union
 
-from database.db_connector import DBConnector
+from database.mongo_connector import MongoConnector
 from .citations_fetcher import CitationsFetcher
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ class PaperQualityAssessor:
     
     def __init__(self, citations_fetcher: CitationsFetcher = None, db_connector=None):
         # Use provided DB connector or create a new one
-        self.db_connector = db_connector or DBConnector()
+        self.db_connector = db_connector or MongoConnector()
         
         # Use provided citation fetcher or create a new one with our db_connector
         self.citation_fetcher = citations_fetcher or CitationsFetcher(db_connector=self.db_connector)
