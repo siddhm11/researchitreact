@@ -1,12 +1,12 @@
-import sqlite3
-import json
 import pandas as pd
+import json
 import datetime
 from typing import List, Optional
 import arxiv
 import os
 import logging
 from tenacity import retry, stop_after_attempt, wait_exponential
+from database.mongo_connector import MongoConnector
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -15,45 +15,32 @@ class ArxivFetcher:
     """
     Fetches research papers from Arxiv API with enhanced filtering.
     Implements retry mechanism for reliability.
+    Uses MongoDB for storage.
     """
     
-    def __init__(self, db_path=None):
-        if db_path is None:
-            # Get the directory of the current script
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            db_path = os.path.join(base_dir, "database", "research_papers.db")
+    def __init__(self, mongo_connector=None):
+        """
+        Initialize ArxivFetcher with MongoDB connection.
+        
+        Args:
+            mongo_connector: MongoDB connector instance
+        """
+        if mongo_connector is None:
+            self.mongo_connector = MongoConnector()
+        else:
+            self.mongo_connector = mongo_connector
             
-            # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        
-        self.conn = sqlite3.connect(db_path)
-        self.create_table()
+        self.papers_collection = self.mongo_connector.get_papers_collection()
+        # Create index on paper_id for efficient lookups
+        self.papers_collection.create_index("paper_id", unique=True)
 
-    
-    def create_table(self):
-        query = """
-        CREATE TABLE IF NOT EXISTS papers (
-            paper_id TEXT PRIMARY KEY,
-            title TEXT,
-            abstract TEXT,
-            authors TEXT,
-            primary_category TEXT,
-            categories TEXT,
-            published DATE,
-            pdf_url TEXT,
-            source TEXT,
-            added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )"""  # Add closing parenthesis
-        self.conn.execute(query)
-        self.conn.commit()
-        
     def __del__(self):
-        """Close database connection when object is destroyed"""
-        if hasattr(self, 'conn') and self.conn:
-            self.conn.close()
+        """Close MongoDB connection when object is destroyed"""
+        if hasattr(self, 'mongo_connector'):
+            self.mongo_connector.close()
 
     def fetch_store(self, query="cat:cs.LG", max_results=100, force_refresh: bool = False):
-        """Fetch papers and store only new ones in the database."""
+        """Fetch papers and store only new ones in MongoDB."""
         
         # Step 1: Fetch new papers
         df = self.fetch(query=query, max_results=max_results)
@@ -61,47 +48,65 @@ class ArxivFetcher:
         if df.empty:
             print("⚠️ No papers retrieved! Skipping storage.")
             print(f"Query used: {query}")
-            return df  # Debugging query issues
+            return df
 
-
-        # Step 2: Get already stored paper IDs
-        existing_papers = pd.read_sql("SELECT paper_id FROM papers", self.conn)
-        existing_ids = set(existing_papers["paper_id"])
-
-        # Rename 'id' column to 'paper_id' to match database schema
+        # Rename 'id' column to 'paper_id' to match schema
         if 'id' in df.columns and 'paper_id' not in df.columns:
             df = df.rename(columns={'id': 'paper_id'})
 
-        # 🔹 If force_refresh is enabled, do not filter out already stored papers
-        # Always filter out papers that are already in the database
-        new_df = df[~df["paper_id"].isin(existing_ids)]
-
-
-        if new_df.empty:
-            print("🔄 All fetched papers are already stored. No new papers added.")
-            print(f"Existing IDs: {existing_ids}")  # Debugging stored papers
-
-        else:
-            # Step 4: Store only new papers
-            new_df.to_sql("papers", self.conn, if_exists="append", index=False)
-            print(f"✅ Stored {len(new_df)} new papers.")
-
-        return new_df
-
-
-
-    def check_database(self):
-        """Retrieve stored papers and export to CSV"""
-        query = "SELECT * FROM papers"
-        df = pd.read_sql(query, self.conn)
+        # Step 2: Convert DataFrame to list of dictionaries
+        papers = df.to_dict('records')
         
-        if not df.empty:
-            df.to_csv("research_papers.db", index=False)
-            print("📄 Research papers saved to stored_papers.csv for readability.")
+        # Step 3: Store papers in MongoDB
+        new_count = 0
+        for paper in papers:
+            try:
+                # Add timestamp
+                paper['added_date'] = datetime.datetime.now()
+                
+                # Use upsert to insert or update if force_refresh is True
+                if force_refresh:
+                    result = self.papers_collection.update_one(
+                        {"paper_id": paper["paper_id"]},
+                        {"$set": paper},
+                        upsert=True
+                    )
+                    if result.upserted_id or result.modified_count > 0:
+                        new_count += 1
+                else:
+                    # Only insert if it doesn't exist
+                    result = self.papers_collection.update_one(
+                        {"paper_id": paper["paper_id"]},
+                        {"$setOnInsert": paper},
+                        upsert=True
+                    )
+                    if result.upserted_id:
+                        new_count += 1
+                        
+            except Exception as e:
+                logger.error(f"Error storing paper {paper.get('paper_id')}: {e}")
+        
+        print(f"✅ Stored {new_count} new papers.")
+        
+        # Return DataFrame of only the new papers
+        if new_count == 0:
+            return pd.DataFrame()
         
         return df
 
+    def check_database(self):
+        """Retrieve stored papers as DataFrame"""
+        papers = list(self.papers_collection.find({}, {'_id': 0}))
+        df = pd.DataFrame(papers)
         
+        if not df.empty:
+            print(f"📄 Retrieved {len(df)} papers from MongoDB.")
+        
+        return df
+    
+    # The fetch() and other methods remain largely unchanged
+    # Just keep the fetch(), search_by_keywords(), and search_seminal_papers() methods as they are
+  
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def fetch(self, query: str = "cat:cs.LG", max_results: int = 100, 
           date_start: Optional[str] = None, date_end: Optional[str] = None, 
