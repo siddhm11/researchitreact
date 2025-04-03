@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 class MongoConnector:
     """MongoDB connection handler for the research recommendation system."""
     
-    def __init__(self, connection_string: str = "mongodb://localhost:27017/"):
+    def __init__(self, connection_string: str = "mongodb+srv://admin:test1234%21@clusterfynd.bng6e.mongodb.net/?retryWrites=true&w=majority&appName=clusterfynd"):
         """
         Initialize MongoDB connection.
         
