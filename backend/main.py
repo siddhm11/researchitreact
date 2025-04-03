@@ -380,7 +380,7 @@ async def get_recommendations(
             quality_score = float(row['quality_score']) if 'quality_score' in row else None
                 
             paper = Paper(
-                id=row['id'],
+                paper_id=row['id'],  # Change this from id=row['id'] to paper_id=row['id']
                 title=row['title'],
                 abstract=row['abstract'],
                 authors=row['authors'],
@@ -432,13 +432,14 @@ async def find_seminal_papers(
             quality_score = recommender.assess_paper_quality(row['id'])
             
             paper = Paper(
-                id=row['id'],
+                paper_id=row['id'],  # Change this from id=row['id'] to paper_id=row['id']
                 title=row['title'],
                 abstract=row['abstract'],
                 authors=row['authors'],
                 published=row['published'],
                 pdf_url=row.get('pdf_url'),
                 categories=row.get('categories', []),
+                similarity=row['similarity_percent'],
                 quality_score=quality_score
             )
             papers.append(paper)
