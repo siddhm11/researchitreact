@@ -79,7 +79,6 @@ async def lifespan(app: FastAPI):
             logger.info(f"Loaded existing research index from {index_path}")
         except Exception as e:
             logger.warning(f"Could not load existing index: {e}")
-            logger.warning(traceback.format_exc())
         
         logger.info("Components initialized successfully")
         yield
@@ -176,6 +175,7 @@ class SearchRequest(BaseModel):
                            description=f"Maximum number of results to return (default: {API_SETTINGS['default_max_results']})")
     date_range: Optional[DateRange] = Field(None, description="Optional date range for filtering papers")
     categories: Optional[List[str]] = Field(None, description="Optional list of arXiv categories to filter by")
+    sort_by_citations: bool = Field(False, description="Whether to sort results by citation count")
     
     @field_validator('max_results')
     def validate_max_results(cls, v):
@@ -230,24 +230,7 @@ class Paper(BaseModel):
     categories: Optional[List[str]] = None
     similarity: Optional[float] = None
     quality_score: Optional[float] = None
-    
-    class Config:
-        model_config = {
-            "json_schema_extra": {
-                "example": {
-                    "id": "2301.12345",
-                    "title": "Recent Advances in Transformer Models",
-                    "abstract": "This paper explores the recent advances in transformer architecture...",
-                    "authors": ["J. Smith", "A. Lee"],
-                    "published": "2023-01-15",
-                    "pdf_url": "https://arxiv.org/pdf/2301.12345.pdf",
-                    "categories": ["cs.LG", "cs.CL"],
-                    "similarity": 0.92,
-                    "quality_score": 0.85
-                }
-            }
-        }
-
+    citation_count: Optional[int] = None 
 
 class ApiStatus(BaseModel):
     status: str
@@ -287,41 +270,26 @@ async def search_papers(
         date_start = request.date_range.start_date if request.date_range else None
         date_end = request.date_range.end_date if request.date_range else None
 
-        final_query = request.query
-        if request.categories:
-            cat_query = " OR ".join([f"cat:{cat}" for cat in request.categories])
-            final_query = f"({request.query}) AND ({cat_query})"
-
-        # Use fetch method directly if we just want to display results
-        # without storing in DB
-        papers_df = recommender.fetcher.fetch(
-            query=final_query, 
+        # Use the new search_with_ranking method
+        papers_df = recommender.search_with_ranking(
+            query=request.query, 
             max_results=request.max_results, 
             date_start=date_start, 
-            date_end=date_end
+            date_end=date_end,
+            categories=request.categories,
+            rank_by_citations=request.sort_by_citations,  # Use the flag from request
+            rank_by_quality=True  # Always use quality scoring
         )
-        
-        # Or use fetch_and_index if we want to store in DB and index for later retrieval
-        # papers_df = recommender.fetch_and_index(
-        #     query=final_query, 
-        #     max_results=request.max_results, 
-        #     date_start=date_start, 
-        #     date_end=date_end, 
-        #     force_refresh=True  
-        # )
 
-        logger.info(f"Fetched {len(papers_df)} papers from Arxiv API")
+        logger.info(f"Retrieved {len(papers_df)} papers with ranking")
         
         if papers_df.empty:
-            logger.warning(f"No papers found for query: {final_query}")
+            logger.warning(f"No papers found for query: {request.query}")
             return []
 
         # Convert DataFrame to list of Paper models
         papers = []
         for _, row in papers_df.iterrows():
-            # Handle both id and paper_id column names
-            paper_id = row.get('paper_id', row.get('id', 'unknown_id'))
-            
             # Handle serialization of authors and categories
             authors = row['authors']
             if isinstance(authors, str):
@@ -338,13 +306,15 @@ async def search_papers(
                     categories = [categories]
             
             papers.append(Paper(
-                paper_id=paper_id,
+                paper_id=row['paper_id'],
                 title=str(row['title']).strip(),
                 abstract=str(row.get('abstract', '')).strip(),
                 authors=authors,
                 published=str(row.get('published', '')),
                 pdf_url=row.get('pdf_url'),
-                categories=categories
+                categories=categories,
+                citation_count=row.get('citation_count', 0),
+                quality_score=row.get('quality_score', None)
             ))
 
         return papers
@@ -357,7 +327,8 @@ async def search_papers(
             detail=f"Error processing search request: {str(e)}"
         )
         
-        
+
+
 @app.post("/recommend", response_model=List[Paper])
 async def get_recommendations(
     request: RecommendRequest,

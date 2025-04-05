@@ -125,6 +125,88 @@ class ResearchRecommender:
             return pd.DataFrame()
 
     
+    def search_with_ranking(self, query: str, max_results: int = 50,
+                        date_start: Optional[str] = None,
+                        date_end: Optional[str] = None,
+                        categories: Optional[List[str]] = None,
+                        rank_by_citations: bool = False,
+                        rank_by_quality: bool = False) -> pd.DataFrame:
+        """
+        Search for papers with advanced ranking options
+        
+        Args:
+            query: ArXiv search query
+            max_results: Maximum number of results to return
+            date_start: Start date in YYYY-MM-DD format
+            date_end: End date in YYYY-MM-DD format
+            categories: List of arXiv categories to filter by
+            rank_by_citations: Whether to rank by citation count
+            rank_by_quality: Whether to rank by quality score
+            
+        Returns:
+            DataFrame with search results
+        """
+        try:
+            # Construct the query with categories if provided
+            final_query = query
+            if categories:
+                cat_query = " OR ".join([f"cat:{cat}" for cat in categories])
+                final_query = f"({query}) AND ({cat_query})"
+                
+            # Fetch and index papers
+            papers_df = self.fetch_and_index(
+                query=final_query, 
+                max_results=max_results,
+                date_start=date_start,
+                date_end=date_end,
+                force_refresh=True
+            )
+            
+            if papers_df.empty:
+                self.logger.warning(f"No papers found for query: {final_query}")
+                return pd.DataFrame()
+                
+            # Add paper IDs if not present
+            paper_id_col = 'paper_id' if 'paper_id' in papers_df.columns else 'id'
+            if 'paper_id' not in papers_df.columns:
+                papers_df['paper_id'] = papers_df[paper_id_col]
+                
+            # Add ranking metrics if requested
+            if rank_by_citations or rank_by_quality:
+                self.logger.info(f"Adding ranking metrics for {len(papers_df)} papers")
+                
+                # Add citation counts and quality scores
+                papers_df['citation_count'] = 0
+                papers_df['quality_score'] = 0.0
+                
+                for i, row in papers_df.iterrows():
+                    paper_id = row['paper_id']
+                    
+                    # Get citation info
+                    citation_info = self.citations_fetcher.get_citation_count(paper_id, row.get('title'))
+                    papers_df.at[i, 'citation_count'] = citation_info.get('citation_count', 0)
+                    
+                    # Calculate quality score
+                    if rank_by_quality:
+                        papers_df.at[i, 'quality_score'] = self.quality_assessor.assess_paper_quality(row.to_dict())
+                
+                # Apply ranking
+                if rank_by_citations and rank_by_quality:
+                    # Combined ranking: normalize and add both scores
+                    max_citations = papers_df['citation_count'].max() if papers_df['citation_count'].max() > 0 else 1
+                    papers_df['combined_score'] = (papers_df['citation_count'] / max_citations * 0.7) + (papers_df['quality_score'] * 0.3)
+                    papers_df = papers_df.sort_values('combined_score', ascending=False)
+                elif rank_by_citations:
+                    papers_df = papers_df.sort_values('citation_count', ascending=False)
+                elif rank_by_quality:
+                    papers_df = papers_df.sort_values('quality_score', ascending=False)
+                    
+            return papers_df
+            
+        except Exception as e:
+            self.logger.error(f"Error in search_with_ranking: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return pd.DataFrame()
     def _index_papers(self, papers_df: pd.DataFrame) -> None:
         if papers_df.empty:
             return
@@ -254,7 +336,7 @@ class ResearchRecommender:
             
             self._index_papers(papers_df)
             self.logger.info(f"Getting citation info for {len(papers_df)} papers")
-            papers_df['citation_count'] = 0
+            papers_df['citation_count'] = get_citation_info()
             for i, row in papers_df.iterrows():
                 paper_id = row['paper_id'] if 'paper_id' in row else row['id']
                 citation_info = self.get_citation_info(paper_id)
